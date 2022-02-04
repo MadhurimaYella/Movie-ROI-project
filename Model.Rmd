@@ -1,0 +1,118 @@
+# Load Library 
+```{r}
+library(rsample)
+library(dplyr)
+library(tidyverse)
+library(ranger)
+library(Metrics)
+library(glmnet)
+#library(keras)
+source("DataAnalyticsFunctions.R")
+set.seed(403010)
+```
+
+# Import Data 
+```{r}
+movie = read.csv("cleaned_data.csv")
+movie
+```
+# Decide On the Features and Target
+```{r}
+movie["ROI_perc"] = (movie["gross_world"]-movie["budget_corrected"])/movie["budget_corrected"]
+features = movie[!colnames(movie) %in% c("Profit","gross_world","ROI_perc")]
+#target = movie["ROI_perc"]
+target = movie["Profit"]/1000000
+DATA = as_tibble(cbind(features,target))
+head(DATA)
+```
+```{r}
+ggplot(DATA, aes(Profit))+
+  geom_boxplot()
+summary(DATA$Profit)
+```
+
+```{r}
+#Build 10-fold
+data =  DATA %>%
+    vfold_cv(v=10) %>% 
+    mutate(train=map(splits,~training(.x)),validate = map(splits,~testing(.x)))
+```
+
+# Builde model- Linear
+```{r}
+model2 = data %>% 
+  mutate(model = map(train,~lm(Profit~.-country_USA-Language_English-title_year-color-actor_1_name_100-actor_2_name_100-actor_3_name_100-main_stream-cast_total_facebook_likes,data=.x)))
+pred2= mutate(model2, 
+              adj.r.sqr = map_dbl(model,~summary(.x)$adj.r.squared),
+              validate_actual = map(validate, ~.x$Profit),
+              validate_predicted = map2(model, validate, ~predict(.x,.y)))
+performance2 = mutate(pred2,
+                      mae = map2_dbl(validate_actual, validate_predicted,~mae(.x,.y)),
+                      r2 = map2_dbl(validate_actual, validate_predicted,~R2(.x,.y)))
+outcome2 = performance2 %>% 
+  summarise(validate_mean_mae = mean(mae), validate_mean_r2 = mean(r2),train_r_sqr = mean(adj.r.sqr))
+# Evaluate outcome
+filter(outcome2, validate_mean_mae == min(outcome2$validate_mean_mae))
+```
+# Build model - Lasso 
+```{r}
+Mx=model.matrix(Profit~.,data=DATA)
+My=DATA$Profit
+lambdas_to_try= 10^seq(-3, 5, length.out = 100)
+lasso_cv = cv.glmnet(Mx, My, alpha = 1, lambda = lambdas_to_try,
+                      standardize = TRUE, nfolds = 10)
+lambda = lasso_cv$lambda.min
+lambda
+plot(lasso_cv)
+```
+
+```{r}
+# build model
+model3 = data %>% 
+  mutate(
+        model = map(train,~glmnet(model.matrix(Profit~.,data=.x),.x$Profit,alpha = 1,lambda=lambda,standardize = TRUE)),
+        Mx_validate = map(validate,~model.matrix(Profit~.,data=.x)),
+        validate_actual = map(validate, ~.x$Profit)
+         )
+pred3= mutate(model3, 
+              train_predicted = map2(model, train, ~predict(.x,model.matrix(Profit~.,data=.y))),
+              validate_predicted = map2(model, Mx_validate, ~predict(.x,.y)))
+performance3 = mutate(pred3,
+                      r.sqr=map2_dbl(train_predicted,train,~cor(.x, .y$Profit)^2),
+                      mae = map2_dbl(validate_actual,validate_predicted,~mae(.x,.y)),
+                      r2 = map2_dbl(validate_actual, validate_predicted,~R2(.x,.y)))
+
+outcome3 = performance3 %>% 
+  summarise(validate_mean_mae = mean(mae),  validate_mean_r2 = mean(r2),train_r_sqr = mean(r.sqr))
+outcome3
+# Evaluate outcome
+filter(outcome3, validate_mean_mae == min(outcome3$validate_mean_mae))
+```
+
+
+# Build model - Random Forest
+```{r}
+model = crossing(data, mtry = 1:38) %>% 
+  mutate(model = map2(train,mtry, ~ranger(Profit~.,data =.x,mtry=.y, seed=403010)))
+
+pred = mutate(model, 
+              r.sqr = map_dbl(model,~.x$r.squared),
+              validate_actual = map(validate, ~.x$Profit),
+              validate_predicted = map2(model, validate, ~predict(.x,.y)$predictions))
+performance = mutate(pred,
+                     mae = map2_dbl(validate_actual, validate_predicted,~mae(.x,.y)),
+                     r2 = map2_dbl(validate_actual, validate_predicted,~R2(.x,.y)))
+        
+outcome = performance %>% 
+  group_by(mtry) %>% 
+  summarise(validate_mean_mae = mean(mae), validate_mean_r2 = mean(r2),train_r_sqr = mean(r.sqr))
+outcome
+# Evaluate outcome
+filter(outcome, validate_mean_mae == min(outcome$validate_mean_mae))
+```
+
+
+```{r}
+```
+
+
